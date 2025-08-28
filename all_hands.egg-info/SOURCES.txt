@@ -1,0 +1,8 @@
+README.md
+setup.py
+all_hands.egg-info/PKG-INFO
+all_hands.egg-info/SOURCES.txt
+all_hands.egg-info/dependency_links.txt
+all_hands.egg-info/entry_points.txt
+all_hands.egg-info/requires.txt
+all_hands.egg-info/top_level.txt

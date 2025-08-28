@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+setup.py
+ollama_web_answer_agent.egg-info/PKG-INFO
+ollama_web_answer_agent.egg-info/SOURCES.txt
+ollama_web_answer_agent.egg-info/dependency_links.txt
+ollama_web_answer_agent.egg-info/entry_points.txt
+ollama_web_answer_agent.egg-info/requires.txt
+ollama_web_answer_agent.egg-info/top_level.txt

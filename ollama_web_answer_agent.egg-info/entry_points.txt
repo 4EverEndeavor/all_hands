@@ -1,0 +1,2 @@
+[console_scripts]
+all-hands = all_hands_pkg.__main__:main

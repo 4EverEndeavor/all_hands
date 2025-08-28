@@ -1,0 +1,35 @@
+**Ollama Web Answer Agent**
+
+This is a minimal Python CLI that uses DuckDuckGo to search the web, fetches the top results, and asks an Ollama model to synthesize a concise, cited answer.
+
+Requirements
+- Python 3.9+
+- Ollama installed and running locally: https://ollama.ai
+- An Ollama chat-capable model pulled (e.g., `llama3.1:8b`)
+
+Setup
+- Create a virtual environment and install deps:
+  - `python -m venv .venv && source .venv/bin/activate`
+  - `pip install -r requirements.txt`
+- Pull a model (example):
+  - `ollama pull llama3.1:8b`
+
+Usage
+- Install locally (editable):
+  - `pip install -e .`
+- Run with a question using the console script:
+  - `all-hands "What is the difference between HTTP/2 and HTTP/3?"`
+- Common options:
+  - `--max-results 5` number of search results to use
+  - `--per-page-chars 8000` max characters from each page
+  - `--model llama3.1:8b` Ollama model name
+  - `--temperature 0.2` decoding temperature
+  - `--verbose` print intermediate steps
+
+Notes
+- This agent performs network requests to search and fetch pages.
+- If a page blocks scraping or is very large, the agent truncates content.
+- You can customize the model via `--model` or `OLLAMA_MODEL` env var.
+
+Example
+- `all-hands "Explain Rust's borrow checker with an example." --max-results 4 --verbose`
