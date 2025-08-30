@@ -32,6 +32,8 @@ import tempfile
 import logging
 import subprocess
 import platform
+import difflib
+import pprint
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -41,7 +43,7 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
 MAX_TURNS = int(os.getenv("AGENT_MAX_TURNS", "12"))
 MAX_INGEST_BYTES = int(os.getenv("AGENT_MAX_INGEST_BYTES", str(200 * 1024)))
-CHECKLIST_PATH = os.path.expanduser(os.getenv("CHECKLIST_PATH", "~/.ollama_coder_checklist.json"))
+CHECKLIST_PATH = '.all_hands/checklist.txt'
 
 # Logging setup
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -61,6 +63,8 @@ SYSTEM_PROMPT = (
     "General rules:\n"
     "- Prefer reading files before proposing edits.\n"
     "- Keep edits minimal; avoid collateral changes.\n"
+    "- Make sure to read the contents of a file before suggesting any proposed edits on that file.\n"
+    "- Make sure to check the contents of a directory before attempting to add, edit or remove files.\n"
     "- If a task seems risky (e.g., destructive commands), explain risks and ask for confirmation.\n"
     "Output plain helpful text unless you need to call tools."
     "When you are given a task, break the task into any number of smaller tasks.\n"
@@ -72,6 +76,8 @@ SYSTEM_PROMPT = (
     "]\n"
     "When a task has been updated, use the update_checklist tool.\n"
     "When all tasks have been completed, update the checklist to and empty list\n"
+    "Your first course of action should either be to create the checklist by calling\n"
+    "update_checklist or asking a question to the user to further clarify the task.\n"
     "For any failed tasks, output a possible explanation of why the task failed.\n"
     "Propose possible solutions. If no solutions are available,\n"
     "suggest some approaches on how to investigate or troubleshoot the issue.\n"
@@ -80,14 +86,97 @@ SYSTEM_PROMPT = (
     "Any mentioned files will be at or below this directory.\n"
     "You may need to use commands to find files, move around between\n"
     "directories, or list the contents of directories.\n"
+    "You may propose suggestions for new tools if you think one would be helpful or necessary\n"
 )
 
-
 # ---------------- Helpers ----------------
+def create_all_hands_folder():
+    """Creates the folder '~/.all_hands' if it doesn't already exist."""
+    home_dir = os.path.expanduser("~")
+    folder_path = os.path.join(home_dir, ".all_hands")
+
+    if not os.path.exists(folder_path):
+        try:
+            os.makedirs(folder_path)
+            print("Folder '~/.all_hands' created successfully.")
+        except OSError as e:
+            print(f"Error creating folder: {e}")
+    else:
+        print("Folder '~/.all_hands' already exists.")
+
+
+def create_checklist_file():
+    """Creates the file 'checklist.txt' if it doesn't already exist."""
+    print('creating checklist file')
+    home_dir = os.path.expanduser("~")
+    print(f"home_dir: {home_dir}")
+    file_path = os.path.join(home_dir, CHECKLIST_PATH)
+    print(f"creating checklist file at: {file_path}")
+    initial_checklist = (
+      "Checklist:\n"
+      "[\n"
+      "  {pending: Clarify your first task},\n"
+      "  {pending: Break this task into smaller tasks and call update_checklist}\n"
+      "]"
+    )
+
+    if not os.path.exists(file_path):
+        try:
+            with open(file_path, "w") as checklist_file:
+                checklist_file.write(initial_checklist)
+                print("File 'checklist.txt' created successfully.")
+        except OSError as e:
+            print(f"Error creating file: {e}")
+    else:
+        print("File 'checklist.txt' already exists.")
+
+
+def get_checklist_from_file():
+    """Retrieves the checklist from the file."""
+    home_dir = os.path.expanduser("~")
+    file_path = os.path.join(home_dir, CHECKLIST_PATH)
+    checklist = "[]"
+    with open(file_path, 'r') as checklist_file:
+        checklist = checklist_file.read()
+        return checklist
+
+def get_additional_context() -> str:
+    """
+    Reads and returns the contents of AGENTS.md file in the same directory.
+    
+    Returns:
+        str: The contents of the AGENTS.md file.
+    """
+
+    # Get the absolute path to the current directory
+    current_dir = os.getcwd()
+    
+    # Construct the full path to the AGENTS.md file
+    agents_path = current_dir + '/AGENTS.md'
+    print(f"agents_path: {agents_path}")
+    
+    try:
+        # Read and return the contents of the AGENTS.md file
+        with open(agents_path, 'r') as f:
+            additional_context = f.read()
+        return additional_context
+    
+    except FileNotFoundError:
+        print("The AGENTS.md file was not found in the current directory.")
+        return None
+
+
+# Read and display the contents of AGENTS.md file on initial agent prompt
+additional_context = get_additional_context()
+if additional_context:
+    SYSTEM_PROMPT += "Directory specific context:\n" \
+        + additional_context + "\n"
+
 
 def shlex_quote(s: str) -> str:
     import shlex as _shlex
     return _shlex.quote(s)
+
 
 def run_command_stream(command: str, cwd: Optional[str]) -> int:
     print(f"\n[exec] {command}\n")
@@ -132,7 +221,6 @@ def print_hr():
 
 # Global state that some tools use
 CURRENT_CWD: Optional[str] = None
-CHECKLIST = []
 
 # ---- Tool implementations ----
 
@@ -150,44 +238,48 @@ def _tool_result_message(name: str, content: Dict[str, Any], tool_call_id: Optio
     return payload
 
 
-# 1) edit a file
+# edit a file
 def edit_file(args: Dict[str, Any]) -> Dict[str, Any]:
     file = args.get("file")
-    command = args.get("command")
+    contents = args.get("contents")
     if not file:
         return {"ok": False, "error": "file is required"}
-    if not command:
-        return {"ok": False, "error": "command is required"}
-    print(f"proposed file edit: {command}")
-    choice = input(f"Does this look safe?  y/n\n")
+    if not contents:
+        return {"ok": False, "error": "contents is required"}
+    print(f"proposed file edit:\n{contents}")
+    choice = input("Does this look safe?  y/n\n")
     if choice != "y":
-        return {"ok": False, "error": "command does not appear to be safe to run"}
+        return {"ok": False, "error": "contents do not appear to be safe"}
 
     # show a diff
     try:
         # 1. Create a temporary file
         temp_file = tempfile.NamedTemporaryFile(delete=False)
         temp_file_path = temp_file.name
-        logger.debug(f"Created temporary file {temp_file_path}")
+        print(f"Created temporary file {temp_file_path}")
 
         # 2. Copy the contents of the input file to the temp file
         shutil.copy2(file, temp_file_path)
-        logger.debug(f"Copied contents from {file} to {temp_file_path}")
+        print(f"Copied contents from {file} to {temp_file_path}")
 
-        # 4. Execute the sed command
-        logger.debug(f"Executing command {command} in shell")
-        subprocess.run(command, shell=True, check=True)
+        # 3. Put new changes inside original file
+        with open(file, 'w') as replace_contents:
+            replace_contents.write(contents)
 
-        # 5. Diff the original and modified files
-        logger.debug("displaying diff now")
+        # 4. show diff
         print("\n--- Diff ---")
-        subprocess.run(["diff -y", file, temp_file_path], check=True)
+        with open(file, 'r') as f1, open(temp_file_path, 'r') as f2:
+            diff = difflib.unified_diff(
+                f1.readlines(), f2.readlines(),
+                fromfile=temp_file_path, tofile=file)
+            for line in diff:
+                print(line)
         print("--- End Diff ---")
 
         # 6. Excecute changes
-        choice = input('Apply the changes? y/n')
+        choice = input('Apply the changes? y/n\n')
         if choice == 'y':
-            return {'ok': True, "message": "Successfully executed command"}
+            return {'ok': True, "message": "Successfully executed contents"}
         else:
             # copy the original contents back into the original file
             shutil.copy2(temp_file_path, file)
@@ -195,7 +287,7 @@ def edit_file(args: Dict[str, Any]) -> Dict[str, Any]:
             return {'ok': False, "reasonn for rejection": reason}
             
     except subprocess.CalledProcessError as e:
-        print(f"Error executing command: {e}")
+        print(f"Error executing contents: {e}")
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:
@@ -205,7 +297,7 @@ def edit_file(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 
-# 2) read file
+# read file
 def read_file(args: Dict[str, Any]) -> Dict[str, Any]:
     path = args.get("path")
     start = args.get("start_line")
@@ -219,6 +311,7 @@ def read_file(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": f"read failed: {e}"}
 
     print(f"Reading the contents from {path}")
+    print(f"lines: {lines}")
 
     s = int(start) if start else 1
     e = int(end) if end else len(lines)
@@ -239,10 +332,36 @@ def read_file(args: Dict[str, Any]) -> Dict[str, Any]:
         numbered.append(f"{i:>6}  {l}")
     text = "\n".join(numbered)
 
+    print(f"read text:\n\n {text}")
+
     return {
         "ok": True, "path": path, "start": s, "end": e,
         "truncated": truncated, "content": text
     }
+
+
+# create a new file
+def create_file(args: Dict[str, Any]) -> Dict[str, Any]:
+    filepath = args.get("filepath")
+    contents = args.get("contents")
+    if not filepath:
+        return {"ok": False, "error": "filepath is required"}
+    if not contents:
+        return {"ok": False, "error": "contents is required"}
+
+    choice = input(f"{contents}\n\n{filepath}\n\nCreate new file?  y/n\n")
+    if choice == 'y':
+        try:
+            with open(filepath, "w") as f:
+                f.write(contents)
+                print(f"File '{filepath}' created successfully.")
+            return {"ok": True, "message": "File successfully created"}
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return {"ok": False, "error": f"exception creating file: {e}"}
+    else:
+        return {"ok": False, "message": "User chose not to create file"}
+
 
 
 # 3) find_file_by_name_tool
@@ -307,12 +426,17 @@ def run_shell_command_tool(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def update_checklist(args: Dict[str, Any]) -> Dict[str, Any]:
     checklist = args.get("checklist")
+    print(f"Updating checklist to {checklist}")
     if not checklist:
         return {"ok": False, "error": "checklist is required"}
-    CHECKLIST = checklist
+    home_dir = os.path.expanduser("~")
+    file_path = os.path.join(home_dir, CHECKLIST_PATH)
+    with open(file_path, 'w') as checklist_file:
+        checklist_file.write(checklist)
     return {"ok": True, "message": "checklist successfully updated"}
 
 # ---- Tool registry ----
+
 
 TOOLS = [
     {
@@ -320,15 +444,18 @@ TOOLS = [
         "function":
         {
             "name": "edit_file",
-            "description": "Edit a single file with a shell command.",
+            "description": "Edit a single file. If you need to make any edits to a file, this is your only way to do it. Do not call this tool unless you have read the contents of the file first.",
             "parameters":
             {
                 "type": "object",
                 "properties": {
                     "file": {"type": "string"},
-                    "command": {"type": "string"}
+                    "contents": {
+                        "type": "string",
+                        "description": "This replaces the ENTIRE contents of the file."
+                    }
                 },
-                "required": ["file", "command"],
+                "required": ["file", "contents"],
             },
         }
     },
@@ -347,6 +474,22 @@ TOOLS = [
                 },
                 "required": ["path"],
             },
+        }
+    },
+    {
+        "type": "function",
+        "function":
+        {
+            "name": "create_file",
+            "description": "Create a new file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string"},
+                    "contents": {"type": "string"},
+                },
+                "required": ["filepath", "contents"]
+            }
         }
     },
     {
@@ -383,22 +526,6 @@ TOOLS = [
         "type": "function",
         "function":
         {
-            "name": "run_shell_command_tool",
-            "description": "Run a shell command after explicit user confirmation. Use for diagnostics, git, etc.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["capture", "stream"], "default": "capture"},
-                },
-                "required": ["command"],
-            },
-        }
-    },
-    {
-        "type": "function",
-        "function":
-        {
             "name": "update_checklist",
             "description": "Mark an existing checklist item as pending/completed/failed.",
             "parameters": {
@@ -411,6 +538,24 @@ TOOLS = [
         }
     },
 ]
+'''
+{
+    "type": "function",
+    "function":
+    {
+        "name": "run_shell_command_tool",
+        "description": "Run a shell command after explicit user confirmation. Use for diagnostics, git, etc.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "mode": {"type": "string", "enum": ["capture", "stream"], "default": "capture"},
+            },
+            "required": ["command"],
+        },
+    }
+},
+'''
 
 
 # name -> handler
@@ -424,7 +569,7 @@ for tool in TOOLS:
 
 
 def ask_ollama(messages: List[Dict[str, Any]]):
-    logger.debug("Sending to Ollama model=%s", OLLAMA_MODEL)
+    # print("Sending to Ollama model=%s", OLLAMA_MODEL)
     try:
         logger.debug("Outgoing messages: %s", json.dumps(messages, ensure_ascii=False))
     except Exception:
@@ -435,7 +580,7 @@ def ask_ollama(messages: List[Dict[str, Any]]):
         tools=TOOLS,
         stream=False,
     )
-    logger.debug("Raw Ollama response: %s", resp)
+    # print("Raw Ollama response: %s", resp)
     return resp
 
 
@@ -444,16 +589,21 @@ def handle_tool_calls(resp: Dict[str, Any], messages: List[Dict[str, Any]]) -> b
     msg = resp.get("message", {})
     tool_calls = msg.get("tool_calls") or []
     executed = False
+    # print(f"handling tool calls:\n{msg}\n{tool_calls}")
+    print(f"handling tool calls:\n{msg}\n{tool_calls}")
     for tc in tool_calls:
         func = (tc.get("function") or {})
         name = func.get("name")
         args_raw = func.get("arguments")
         tool_call_id = tc.get("id") or tc.get("tool_call_id")
+        print(f"Calling function {func}")
         try:
             args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+            print(f"Function args: {args}")
         except Exception as e:
             args = {"_parse_error": str(e), "raw": args_raw}
         handler = TOOL_HANDLERS.get(name)
+        print(f"handler: {handler}")
         if not handler:
             result = {"ok": False, "error": f"unknown tool: {name}"}
         else:
@@ -469,9 +619,13 @@ def handle_tool_calls(resp: Dict[str, Any], messages: List[Dict[str, Any]]) -> b
 def trim_history(messages: List[Dict[str, Any]]):
     # Keep system + last N user/assistant/tool exchanges
     max_len = 2 * MAX_TURNS + 1
+    sys_prompt = messages[0]
+    checklist_msg = {"role": "system", "content": get_checklist_from_file()}
     while len(messages) > max_len:
         # Don't drop the first system message
-        del messages[1:3]
+        del messages[0]
+    trimmed_msgs = [sys_prompt] + [checklist_msg] + messages
+    return trimmed_msgs
 
 
 # ---------------- Main ----------------
@@ -479,6 +633,8 @@ def trim_history(messages: List[Dict[str, Any]]):
 def main():
     global CURRENT_CWD
     CURRENT_CWD = os.getcwd()
+    create_all_hands_folder()
+    create_checklist_file()
 
     print_hr()
     print("Ollama Coder (tools edition) — ingest + checklist + safe edits")
@@ -489,11 +645,18 @@ def main():
     print_hr()
 
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT}
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": get_checklist_from_file()},
     ]
 
     def show_checklist():
-        print_hr(); print(CHECKLIST); print_hr()
+        print_hr(); print(get_checklist_from_file()); print_hr()
+
+    def show_messages():
+        try:
+            pprint.pprint(messages)  # Pretty print the Python object
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON: {e}")
 
     while True:
         try:
@@ -501,7 +664,7 @@ def main():
         except (EOFError, KeyboardInterrupt):
             print("\nBye!"); return
 
-        if user_in.lower() in {"exit", "quit"}:
+        if user_in.lower() in {"exit", "quit", "q"}:
             print("Goodbye!"); return
         if not user_in:
             user_in = "Proceed with checklist"
@@ -514,7 +677,7 @@ def main():
             if cmd == ":checklist":
                 show_checklist(); continue
             if cmd == ":messages":
-                print(messages); continue
+                show_messages(); continue
             if cmd == ":cd":
                 path = arg or os.path.expanduser("~")
                 try:
@@ -551,7 +714,7 @@ def main():
                 print_hr(); print(content); print_hr()
             break
 
-        trim_history(messages)
+        messages = trim_history(messages)
 
 
 if __name__ == "__main__":
