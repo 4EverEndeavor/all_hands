@@ -65,7 +65,6 @@ SYSTEM_PROMPT = (
     "- Keep edits minimal; avoid collateral changes.\n"
     "- Make sure to read the contents of a file before suggesting any proposed edits on that file.\n"
     "- Make sure to check the contents of a directory before attempting to add, edit or remove files.\n"
-    "- If a task seems risky (e.g., destructive commands), explain risks and ask for confirmation.\n"
     "Output plain helpful text unless you need to call tools."
     "When you are given a task, break the task into any number of smaller tasks.\n"
     "Create a checklist for these tasks in the following list-of-maps-style format: \n"
@@ -85,6 +84,19 @@ SYSTEM_PROMPT = (
     "You may need to use commands to find files, move around between\n"
     "directories, or list the contents of directories.\n"
     "You may propose suggestions for new tools if you think one would be helpful or necessary\n"
+    "Editing files:\n"
+    "    The only way you may edit the contents of a file is by creating a git patch.\n"
+    "    Here are the necessary steps:\n"
+    "    1. Make sure you have the whole contents of the file in context. That is, it must be visible in the chat history.\n"
+    "    2. If the file contents are not inside the chat history, read the contents of the file by calling a command like \"cat\".\n"
+    "    3. Generate a git patch file using terminal commands with the proposed changes.\n"
+    "    4. Create a temp file called <file_name>.<extension>.bak\n"
+    "    5. Copy the contents of the original file into the temporary file.\n"
+    "    6. Run apply the git patch to the original file.\n"
+    "    7. Run \"git diff\" from the terminal to show the output to the user.\n"
+    "    8. Ask the user if the changes are ok.\n"
+    "    9. If the user approves the changes, delete the temp file.\n"
+    "   10. If the user rejects the changes, copy the contents from the temp file back into the original file.\n"
 )
 
 # ---------------- Helpers ----------------
@@ -502,7 +514,9 @@ def run_shell_command_tool(args: Dict[str, Any]) -> Dict[str, Any]:
     print("Run this command? [y/N]: ")
     choice = prompt_agent()
     if choice.strip().lower() != 'y':
-        return {"ok": True, "ran": False, "message": "user declined"}
+        print('What is the reason for rejecting the command')
+        reason = prompt_agent()
+        return {"ok": True, "ran": False, "message": reason}
 
     if mode == "stream":
         code = run_command_stream(command, CURRENT_CWD)
@@ -630,24 +644,25 @@ TOOLS = [
         }
     },
 ]
-'''
-{
-    "type": "function",
-    "function":
+
+TERMINAL_TOOLS = [
     {
-        "name": "run_shell_command_tool",
-        "description": "Run a shell command after explicit user confirmation. Use for diagnostics, git, etc.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string"},
-                "mode": {"type": "string", "enum": ["capture", "stream"], "default": "capture"},
+        "type": "function",
+        "function":
+        {
+            "name": "run_shell_command_tool",
+            "description": "Run a shell command after explicit user confirmation. Use for diagnostics, git, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["capture", "stream"], "default": "capture"},
+                },
+                "required": ["command"],
             },
-            "required": ["command"],
-        },
-    }
-},
-'''
+        }
+    },
+]
 
 
 # name -> handler
@@ -669,7 +684,7 @@ def ask_ollama(messages: List[Dict[str, Any]]):
     resp = client.chat(
         model=OLLAMA_MODEL,
         messages=messages,
-        tools=TOOLS,
+        tools=TERMINAL_TOOLS,
         stream=False,
     )
     # print("Raw Ollama response: %s", resp)
@@ -695,7 +710,7 @@ def handle_tool_calls(resp: Dict[str, Any], messages: List[Dict[str, Any]]) -> b
             print(f"Function args: {args}")
         except Exception as e:
             args = {"_parse_error": str(e), "raw": args_raw}
-        handler = TOOL_HANDLERS.get(name)
+        handler = globals()[name]
         print(f"handler: {handler}")
         if not handler:
             result = {"ok": False, "error": f"unknown tool: {name}"}
