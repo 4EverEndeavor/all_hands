@@ -1,3 +1,3 @@
-1. Add a feature to main_agent.py so the initial agent prompt tries to read the contents of a file called AGENTS.md. This file contains any additional context that applies only to the current directory.
 2. Colorize the terminal output.
+I want this project to print colorized output to the terminal instead of plain white text. Go through main_agent.py and make sure that any text printed from the ollama agent is colored green.
 

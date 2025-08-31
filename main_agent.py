@@ -35,6 +35,7 @@ import platform
 import difflib
 import pprint
 from datetime import datetime
+from colorama import Fore, Style
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import ollama
@@ -56,7 +57,6 @@ logger = logging.getLogger("main_agent")
 client = ollama.Client(host=OLLAMA_HOST)
 CHAT_ENDPOINT = f"{OLLAMA_HOST.rstrip('/')}/api/chat"
 
-current_directory = os.getcwd()
 SYSTEM_PROMPT = (
     "You are a careful coding & shell assistant running in a terminal.\n"
     "When possible, call the provided TOOLS instead of writing shell commands directly.\n"
@@ -82,8 +82,6 @@ SYSTEM_PROMPT = (
     "Propose possible solutions. If no solutions are available,\n"
     "suggest some approaches on how to investigate or troubleshoot the issue.\n"
     "These can include terminal commands, checking software versions, ect\n"
-    f"Your current working directory is {current_directory}"
-    "Any mentioned files will be at or below this directory.\n"
     "You may need to use commands to find files, move around between\n"
     "directories, or list the contents of directories.\n"
     "You may propose suggestions for new tools if you think one would be helpful or necessary\n"
@@ -139,6 +137,28 @@ def get_checklist_from_file():
     with open(file_path, 'r') as checklist_file:
         checklist = checklist_file.read()
         return checklist
+
+def get_project_context():
+    """
+    Gathers contextual information for an AI agent to start working on a project.
+
+    Args:
+        project_name (str, optional): The name of the project. Defaults to "".
+
+    Returns:
+        dict: A dictionary containing the project context.
+    """
+
+    context = {
+        "current_working_directory": os.getcwd(),
+        "current_directory_name": os.path.basename(os.getcwd()),
+        "current_directory_path": os.path.abspath(os.getcwd()),
+        "list_of_files": [
+            f for f in os.listdir(os.getcwd())
+            if os.path.isfile(os.path.join(os.getcwd(), f))]
+    }
+
+    return json.dumps(context)
 
 def get_additional_context() -> str:
     """
@@ -247,9 +267,12 @@ def edit_file(args: Dict[str, Any]) -> Dict[str, Any]:
     if not contents:
         return {"ok": False, "error": "contents is required"}
     print(f"proposed file edit:\n{contents}")
-    choice = input("Does this look safe?  y/n\n")
+    print("Does this look right?  y/n\n")
+    choice = prompt_agent()
     if choice != "y":
-        return {"ok": False, "error": "contents do not appear to be safe"}
+        print("What is wrong with this suggestion?\n")
+        reason = prompt_agent()
+        return {"ok": False, "message": reason}
 
     # show a diff
     try:
@@ -277,13 +300,15 @@ def edit_file(args: Dict[str, Any]) -> Dict[str, Any]:
         print("--- End Diff ---")
 
         # 6. Excecute changes
-        choice = input('Apply the changes? y/n\n')
+        print('Apply the changes? y/n\n')
+        choice = prompt_agent()
         if choice == 'y':
             return {'ok': True, "message": "Successfully executed contents"}
         else:
             # copy the original contents back into the original file
             shutil.copy2(temp_file_path, file)
-            reason = input('What is the reason for rejection?')
+            print('What is the reason for rejection?')
+            reason = prompt_agent()
             return {'ok': False, "reasonn for rejection": reason}
             
     except subprocess.CalledProcessError as e:
@@ -295,6 +320,67 @@ def edit_file(args: Dict[str, Any]) -> Dict[str, Any]:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
+# edit a file
+def edit_file_with_git_patch(args: Dict[str, Any]) -> Dict[str, Any]:
+    file = args.get("file")
+    git_patch = args.get("git_patch")
+    if not file:
+        return {"ok": False, "error": "file is required"}
+    if not git_patch:
+        return {"ok": False, "error": "git_patch is required"}
+    print(f"proposed file edit:\n{git_patch}")
+    print("Does this look right?  y/n\n")
+    choice = prompt_agent()
+    if choice != "y":
+        print("What is wrong with this suggestion?\n")
+        reason = prompt_agent()
+        return {"ok": False, "message": reason}
+
+    # show a diff
+    try:
+        # 1. Create a temporary file
+        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        temp_file_path = temp_file.name
+        print(f"Created temporary file {temp_file_path}")
+
+        # 2. Copy the git_patch of the input file to the temp file
+        shutil.copy2(file, temp_file_path)
+        print(f"Copied git_patch from {file} to {temp_file_path}")
+
+        # 3. Put new changes inside original file
+        with open(file, 'w') as replace_contents:
+            replace_contents.write(git_patch)
+
+        # 4. show diff
+        print("\n--- Diff ---")
+        with open(file, 'r') as f1, open(temp_file_path, 'r') as f2:
+            diff = difflib.unified_diff(
+                f1.readlines(), f2.readlines(),
+                fromfile=temp_file_path, tofile=file)
+            for line in diff:
+                print(line)
+        print("--- End Diff ---")
+
+        # 6. Excecute changes
+        print('Apply the changes? y/n\n')
+        choice = prompt_agent()
+        if choice == 'y':
+            return {'ok': True, "message": "Successfully executed git_patch"}
+        else:
+            # copy the original git_patch back into the original file
+            shutil.copy2(temp_file_path, file)
+            print('What is the reason for rejection?')
+            reason = prompt_agent()
+            return {'ok': False, "reasonn for rejection": reason}
+            
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing contents: {e}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
 
 
 # read file
@@ -311,7 +397,7 @@ def read_file(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": f"read failed: {e}"}
 
     print(f"Reading the contents from {path}")
-    print(f"lines: {lines}")
+    # print(f"lines: {lines}")
 
     s = int(start) if start else 1
     e = int(end) if end else len(lines)
@@ -349,7 +435,8 @@ def create_file(args: Dict[str, Any]) -> Dict[str, Any]:
     if not contents:
         return {"ok": False, "error": "contents is required"}
 
-    choice = input(f"{contents}\n\n{filepath}\n\nCreate new file?  y/n\n")
+    print(f"{contents}\n\n{filepath}\n\nCreate new file?  y/n\n")
+    choice = prompt_agent()
     if choice == 'y':
         try:
             with open(filepath, "w") as f:
@@ -412,7 +499,9 @@ def run_shell_command_tool(args: Dict[str, Any]) -> Dict[str, Any]:
     print_hr()
     print("Proposed command:")
     print(f"  {command}")
-    if input("Run this command? [y/N]: ").strip().lower() != 'y':
+    print("Run this command? [y/N]: ")
+    choice = prompt_agent()
+    if choice.strip().lower() != 'y':
         return {"ok": True, "ran": False, "message": "user declined"}
 
     if mode == "stream":
@@ -429,10 +518,11 @@ def update_checklist(args: Dict[str, Any]) -> Dict[str, Any]:
     print(f"Updating checklist to {checklist}")
     if not checklist:
         return {"ok": False, "error": "checklist is required"}
+    checklist_header = "Here is your checklist of tasks:\n"
     home_dir = os.path.expanduser("~")
     file_path = os.path.join(home_dir, CHECKLIST_PATH)
     with open(file_path, 'w') as checklist_file:
-        checklist_file.write(checklist)
+        checklist_file.write(checklist_header + checklist)
     return {"ok": True, "message": "checklist successfully updated"}
 
 # ---- Tool registry ----
@@ -527,11 +617,13 @@ TOOLS = [
         "function":
         {
             "name": "update_checklist",
-            "description": "Mark an existing checklist item as pending/completed/failed.",
+            "description": "Updates the entire contents of the checklist.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "checklist": {"type": "string"},
+                    "checklist": {
+                        "type": "string",
+                        "description": "json string representation of the entire checklist"},
                 },
                 "required": ["checklist"],
             },
@@ -581,6 +673,7 @@ def ask_ollama(messages: List[Dict[str, Any]]):
         stream=False,
     )
     # print("Raw Ollama response: %s", resp)
+
     return resp
 
 
@@ -590,8 +683,8 @@ def handle_tool_calls(resp: Dict[str, Any], messages: List[Dict[str, Any]]) -> b
     tool_calls = msg.get("tool_calls") or []
     executed = False
     # print(f"handling tool calls:\n{msg}\n{tool_calls}")
-    print(f"handling tool calls:\n{msg}\n{tool_calls}")
     for tc in tool_calls:
+        print(f"handling tool call: {tc}")
         func = (tc.get("function") or {})
         name = func.get("name")
         args_raw = func.get("arguments")
@@ -621,12 +714,35 @@ def trim_history(messages: List[Dict[str, Any]]):
     max_len = 2 * MAX_TURNS + 1
     sys_prompt = messages[0]
     checklist_msg = {"role": "system", "content": get_checklist_from_file()}
+    dir_context = {"role": "system", "content": get_project_context()}
+    messages = messages[3:]
     while len(messages) > max_len:
-        # Don't drop the first system message
         del messages[0]
-    trimmed_msgs = [sys_prompt] + [checklist_msg] + messages
+    trimmed_msgs = [sys_prompt] + [checklist_msg] + [dir_context] + messages
     return trimmed_msgs
 
+
+# ---------------- Style----------------
+
+def print_red_text(text):
+    """Prints the given text in red color.
+
+        Args:
+            text: The text to print.
+    """
+    print(Fore.RED + text + Style.RESET_ALL)
+
+
+def prompt_agent():
+    try:
+        user_in = input("\n" + Fore.RED + "agent> " + Style.RESET_ALL).strip()
+        if user_in.lower() in {"exit", "quit", "q"}:
+            print("Goodbye!")
+            exit()
+        return user_in
+    except (EOFError, KeyboardInterrupt):
+        print("\nBye!"); return
+    
 
 # ---------------- Main ----------------
 
@@ -647,6 +763,7 @@ def main():
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": get_checklist_from_file()},
+        {"role": "system", "content": get_project_context()},
     ]
 
     def show_checklist():
@@ -659,15 +776,10 @@ def main():
             print(f"Error decoding JSON: {e}")
 
     while True:
-        try:
-            user_in = input("\nagent> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nBye!"); return
+        user_in = prompt_agent()
 
-        if user_in.lower() in {"exit", "quit", "q"}:
-            print("Goodbye!"); return
         if not user_in:
-            user_in = "Proceed with checklist"
+            user_in = "Proceed with executing checklist tasks"
 
         # Simple local meta commands (non-AI)
         if user_in.startswith(":"):
@@ -704,7 +816,7 @@ def main():
             messages.append(resp.get("message", {}))
 
             if handle_tool_calls(resp, messages):
-                trim_history(messages)
+                messages = trim_history(messages)
                 # model asked for tools; continue the loop to let it see results
                 continue
 

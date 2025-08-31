@@ -1,1 +1,1 @@
-This is my project about [briefly describe your project].
+This is a python module for a terminal based AI code agent
