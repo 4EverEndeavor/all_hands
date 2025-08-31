@@ -34,6 +34,7 @@ import subprocess
 import platform
 import difflib
 import pprint
+import tiktoken
 from datetime import datetime
 from colorama import Fore, Style
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -41,7 +42,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import ollama
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 MAX_TURNS = int(os.getenv("AGENT_MAX_TURNS", "12"))
 MAX_INGEST_BYTES = int(os.getenv("AGENT_MAX_INGEST_BYTES", str(200 * 1024)))
 CHECKLIST_PATH = '.all_hands/checklist.txt'
@@ -59,7 +60,6 @@ CHAT_ENDPOINT = f"{OLLAMA_HOST.rstrip('/')}/api/chat"
 
 SYSTEM_PROMPT = (
     "You are a careful coding & shell assistant running in a terminal.\n"
-    "When possible, call the provided TOOLS instead of writing shell commands directly.\n"
     "General rules:\n"
     "- Prefer reading files before proposing edits.\n"
     "- Keep edits minimal; avoid collateral changes.\n"
@@ -501,6 +501,15 @@ def change_directory_tool(args: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
+def command_requires_approval(agent_command):
+    allowed_commands = ['sed', 'ls', 'cat', 'grep']
+    for cmd in allowed_commands:
+        if agent_command.startswith(cmd):
+            return False
+    return True
+
+
 # 5) run_shell_command_tool (for read‑only or safe commands)
 def run_shell_command_tool(args: Dict[str, Any]) -> Dict[str, Any]:
     command = args.get("command")
@@ -508,22 +517,24 @@ def run_shell_command_tool(args: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(command, str) or not command.strip():
         return {"ok": False, "error": "command (string) is required"}
 
-    print_hr()
-    print("Proposed command:")
-    print(f"  {command}")
-    print("Run this command? [y/N]: ")
-    choice = prompt_agent()
-    if choice.strip().lower() != 'y':
-        print('What is the reason for rejecting the command')
-        reason = prompt_agent()
-        return {"ok": True, "ran": False, "message": reason}
+    if command_requires_approval(command):
+        print("Proposed command:")
+        print(f"  {command}")
+        print("Run this command? [y/N]: ")
+        choice = prompt_agent()
+        if choice.strip().lower() != 'y':
+            print('What is the reason for rejecting the command')
+            reason = prompt_agent()
+            return {"ok": True, "ran": False, "message": reason}
+    else:
+        print(f"Running allowed command: {command}")
 
     # if mode == "stream":
     # code = run_command_stream(command, CURRENT_CWD)
     # return {"ok": True, "ran": True, "exit_code": code}
     # else:
     code, out = run_command_capture(command, CURRENT_CWD)
-    return {"ok": True, "ran": True, "exit_code": code, "output": out}
+    return {"shell command": command, "output": out}
 
 # 6) checklist tools
 
@@ -650,8 +661,25 @@ TERMINAL_TOOLS = [
         "type": "function",
         "function":
         {
+            "name": "update_checklist",
+            "description": "Updates the entire contents of the checklist.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "checklist": {
+                        "type": "string",
+                        "description": "json string representation of the entire checklist"},
+                },
+                "required": ["checklist"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function":
+        {
             "name": "run_shell_command_tool",
-            "description": "Run a shell command",
+            "description": "Run a shell command. Some commands will require user approval. The following list of commands do not require approval: sed, ls, cat, grep",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -673,6 +701,18 @@ for tool in TOOLS:
 
 # ---------------- Chat Loop with Tool Dispatch ----------------
 
+def count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
+    enc = tiktoken.get_encoding(encoding_name)
+    return len(enc.encode(text))
+
+
+def choose_num_ctx(messages, max_output_tokens=512, model_max_ctx=128000):
+    input_text = " ".join(m["content"] for m in messages)
+    input_tokens = count_tokens(input_text)
+    
+    num_ctx = input_tokens + max_output_tokens
+    return min(num_ctx, model_max_ctx)
+
 
 def ask_ollama(messages: List[Dict[str, Any]]):
     # print("Sending to Ollama model=%s", OLLAMA_MODEL)
@@ -684,6 +724,9 @@ def ask_ollama(messages: List[Dict[str, Any]]):
         model=OLLAMA_MODEL,
         messages=messages,
         tools=TERMINAL_TOOLS,
+        keep_alive=0,
+        options={"num_ctx": choose_num_ctx(messages)},
+        # think='high',
         stream=False,
     )
     # print("Raw Ollama response: %s", resp)
@@ -709,7 +752,12 @@ def handle_tool_calls(resp: Dict[str, Any], messages: List[Dict[str, Any]]) -> b
             print(f"Function args: {args}")
         except Exception as e:
             args = {"_parse_error": str(e), "raw": args_raw}
-        handler = globals()[name]
+        handler = None
+        try:
+            handler = globals()[name]
+        except Exception as e:
+            print(e)
+            print(f"Unable to find handler for tool: {name}")
         print(f"handler: {handler}")
         if not handler:
             result = {"ok": False, "error": f"unknown tool: {name}"}
@@ -851,6 +899,7 @@ def main():
 
             resp = ask_ollama(messages)
             messages.append(parse_resp_obj(resp.get("message", {})))
+            thinking.append(resp.get("message").get("thinking"))
 
             if handle_tool_calls(resp, messages):
                 messages = trim_history(messages)
