@@ -504,7 +504,7 @@ def change_directory_tool(args: Dict[str, Any]) -> Dict[str, Any]:
 # 5) run_shell_command_tool (for read‑only or safe commands)
 def run_shell_command_tool(args: Dict[str, Any]) -> Dict[str, Any]:
     command = args.get("command")
-    mode = args.get("mode", "capture")  # capture|stream
+    # mode = args.get("mode", "capture")  # capture|stream
     if not isinstance(command, str) or not command.strip():
         return {"ok": False, "error": "command (string) is required"}
 
@@ -518,12 +518,12 @@ def run_shell_command_tool(args: Dict[str, Any]) -> Dict[str, Any]:
         reason = prompt_agent()
         return {"ok": True, "ran": False, "message": reason}
 
-    if mode == "stream":
-        code = run_command_stream(command, CURRENT_CWD)
-        return {"ok": True, "ran": True, "exit_code": code}
-    else:
-        code, out = run_command_capture(command, CURRENT_CWD)
-        return {"ok": True, "ran": True, "exit_code": code, "output": out}
+    # if mode == "stream":
+    # code = run_command_stream(command, CURRENT_CWD)
+    # return {"ok": True, "ran": True, "exit_code": code}
+    # else:
+    code, out = run_command_capture(command, CURRENT_CWD)
+    return {"ok": True, "ran": True, "exit_code": code, "output": out}
 
 # 6) checklist tools
 
@@ -651,12 +651,11 @@ TERMINAL_TOOLS = [
         "function":
         {
             "name": "run_shell_command_tool",
-            "description": "Run a shell command after explicit user confirmation. Use for diagnostics, git, etc.",
+            "description": "Run a shell command",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["capture", "stream"], "default": "capture"},
                 },
                 "required": ["command"],
             },
@@ -737,16 +736,42 @@ def trim_history(messages: List[Dict[str, Any]]):
     return trimmed_msgs
 
 
+def parse_resp_obj(message):
+    simp_msg = {
+        "role": message['role'],
+        "content": message.get('content')
+    }
+    return simp_msg
+
+
 # ---------------- Style----------------
+def show_messages(messages):
+    colors = {
+        'blue': '\033[94m',
+        'green': '\033[92m',
+        'cyan': '\033[96m',
+        'red': '\033[91m'
+    }
+    reset_color = '\033[0m'
 
-def print_red_text(text):
-    """Prints the given text in red color.
-
-        Args:
-            text: The text to print.
-    """
-    print(Fore.RED + text + Style.RESET_ALL)
-
+    for msg in messages:
+        if not msg: continue
+        color = None
+        if msg['role'] == 'user':
+            color = 'red'
+        elif msg['role'] == 'system':
+            color = 'cyan'
+        elif msg['role'] == 'tool':
+            color = 'blue'
+        elif msg['role'] == 'assistant':
+            color = 'green'
+        else:
+            raise Exception(f"Message without role: {msg}")
+        try:
+            print(colors[color] + json.dumps(msg) + reset_color)
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON: {e}")
+    
 
 def prompt_agent():
     try:
@@ -775,6 +800,7 @@ def main():
     print("Meta commands: ':checklist', ':cd <path>' (local), ':pwd' (local)")
     print_hr()
 
+    thinking = []
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": get_checklist_from_file()},
@@ -783,12 +809,6 @@ def main():
 
     def show_checklist():
         print_hr(); print(get_checklist_from_file()); print_hr()
-
-    def show_messages():
-        try:
-            pprint.pprint(messages)  # Pretty print the Python object
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON: {e}")
 
     while True:
         user_in = prompt_agent()
@@ -801,10 +821,12 @@ def main():
             parts = user_in.split(maxsplit=1)
             cmd = parts[0]
             arg = parts[1] if len(parts) > 1 else ""
+            if cmd == ":think":
+                pprint.pprint(thinking); continue
             if cmd == ":checklist":
                 show_checklist(); continue
             if cmd == ":messages":
-                show_messages(); continue
+                show_messages(messages); continue
             if cmd == ":cd":
                 path = arg or os.path.expanduser("~")
                 try:
@@ -828,7 +850,7 @@ def main():
                 break
 
             resp = ask_ollama(messages)
-            messages.append(resp.get("message", {}))
+            messages.append(parse_resp_obj(resp.get("message", {})))
 
             if handle_tool_calls(resp, messages):
                 messages = trim_history(messages)
