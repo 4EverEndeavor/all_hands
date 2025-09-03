@@ -35,6 +35,7 @@ import platform
 import difflib
 import pprint
 import tiktoken
+import argparse
 from datetime import datetime
 from colorama import Fore, Style
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -832,9 +833,77 @@ def prompt_agent():
         print("\nBye!"); return
     
 
+# --------------Command line args-------
+
+def handle_arguments():
+    """
+    Handles any initial command line arguments the tool is called with.
+    """
+    parser = argparse.ArgumentParser(
+        description="Manage ~/.all_hands/context.txt"
+    )
+    parser.add_argument(
+        "-c", "--context", metavar="FILE",
+        help="Local file to append to context file"
+    )
+    parser.add_argument(
+        "-d", "--delete", action="store_true",
+        help="Clear the contents of the context file"
+    )
+    args = parser.parse_args()
+
+    # Expand ~ and build context file path
+    context_dir = os.path.expanduser("~/.all_hands")
+    context_file = os.path.join(context_dir, "context.txt")
+
+    # Ensure directory exists
+    os.makedirs(context_dir, exist_ok=True)
+
+    if args.delete:
+        try:
+            with open(context_file, "w") as outfile:
+                pass  # truncate the file
+            print(f"Cleared contents of '{context_file}'")
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        exit()
+
+    if args.context:
+        if not os.path.isfile(args.context):
+            print(f"Error: File '{args.context}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            abs_path = os.path.abspath(args.context)
+            file_name = os.path.basename(abs_path)
+
+            with open(args.context, "r") as infile:
+                contents = infile.read()
+
+            with open(context_file, "a") as outfile:
+                outfile.write("`````````````````````````````````````````Begin File Context```````````````````````````````````````````")
+                outfile.write(f"File name: {file_name}\n")
+                outfile.write(f"File path: {abs_path}\n")
+                outfile.write("\n\n")  # add spacing between entries
+                outfile.write(contents)
+                outfile.write("`````````````````````````````````````````End File Context```````````````````````````````````````````")
+                outfile.write("\n\n")  # add spacing between entries
+
+            print(f"Appended contents of '{args.context}' to '{context_file}'")
+
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        exit()
+
+
 # ---------------- Main ----------------
 
 def main():
+
+    handle_arguments()
+
     global CURRENT_CWD
     CURRENT_CWD = os.getcwd()
     create_all_hands_folder()
