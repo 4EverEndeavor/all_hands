@@ -60,13 +60,17 @@ client = ollama.Client(host=OLLAMA_HOST)
 CHAT_ENDPOINT = f"{OLLAMA_HOST.rstrip('/')}/api/chat"
 
 SYSTEM_PROMPT = (
-    "You are a careful coding & shell assistant running in a terminal.\n"
+    "You are an aggressive coding & shell assistant running in a terminal.\n"
+    "I will give you a task to complete.\n"
+    "I am not going to help in the completion of this task.\n"
+    "You must complete this task by calling tools.\n"
+    "If you complete a task, such as creating a file,\n"
+    "you must verify that the file was created by calling a shell command.\n"
     "General rules:\n"
-    "- Prefer reading files before proposing edits.\n"
+    "- Read files before making edits.\n"
     "- Keep edits minimal; avoid collateral changes.\n"
-    "- Make sure to read the contents of a file before suggesting any proposed edits on that file.\n"
     "- Make sure to check the contents of a directory before attempting to add, edit or remove files.\n"
-    "Output plain helpful text unless you need to call tools."
+    "- Always try using tools first, unless a task needs further clarification.\n"
     "When you are given a task, break the task into any number of smaller tasks.\n"
     "Create a checklist for these tasks in the following list-of-maps-style format: \n"
     "[\n"
@@ -712,7 +716,13 @@ def choose_num_ctx(messages, max_output_tokens=512, model_max_ctx=128000):
     input_tokens = count_tokens(input_text)
     
     num_ctx = input_tokens + max_output_tokens
-    return min(num_ctx, model_max_ctx)
+    ctx_pct = (num_ctx / model_max_ctx) * 100
+    return min(num_ctx, model_max_ctx), ctx_pct
+
+
+def notify(title, message):
+    script = f'display notification "{message}" with title "{title}"'
+    subprocess.run(["osascript", "-e", script])
 
 
 def ask_ollama(messages: List[Dict[str, Any]]):
@@ -721,16 +731,21 @@ def ask_ollama(messages: List[Dict[str, Any]]):
         logger.debug("Outgoing messages: %s", json.dumps(messages, ensure_ascii=False))
     except Exception:
         logger.debug("Outgoing messages: %r", messages)
+    num_token_ctx, ctx_pct = choose_num_ctx(messages)
+    print(f"Number token context: {num_token_ctx}")
+    print(f"Percent context: {ctx_pct}")
     resp = client.chat(
         model=OLLAMA_MODEL,
         messages=messages,
         tools=TERMINAL_TOOLS,
         keep_alive=0,
-        options={"num_ctx": choose_num_ctx(messages)},
+        options={"num_ctx": num_token_ctx},
         # think='high',
         stream=False,
     )
     # print("Raw Ollama response: %s", resp)
+
+    notify("Python Script", "Your task finished successfully!")
 
     return resp
 
@@ -971,7 +986,7 @@ def main():
             thinking.append(resp.get("message").get("thinking"))
 
             if handle_tool_calls(resp, messages):
-                messages = trim_history(messages)
+                # messages = trim_history(messages)
                 # model asked for tools; continue the loop to let it see results
                 continue
 
@@ -981,7 +996,7 @@ def main():
                 print_hr(); print(content); print_hr()
             break
 
-        messages = trim_history(messages)
+        # messages = trim_history(messages)
 
 
 if __name__ == "__main__":
